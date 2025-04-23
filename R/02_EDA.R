@@ -1,0 +1,606 @@
+# ---------- Đọc và kiểm tra dữ liệu ----------
+library(redxl)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(stringr)
+library(reshape2)
+library(corrplot)
+library(car)
+library(randomForest)
+library(tsne)
+library(glmnet)
+
+# Đọc dữ liệu từ file Excel
+df <- read_excel("SRD_data_cleaned.xlsx")
+
+# Xem thông tin tổng quát
+str(df)
+summary(df)
+
+# ---------- Nhóm các kiểu dữ liệu ----------
+# Lấy danh sách tất cả các cột
+columns <- colnames(df)
+
+# Tách và nhóm các cột theo SDG
+sdg_pattern <- "^sdg(\\d+)_"
+sdg_groups <- list()
+
+for (col in columns) {
+  match <- regexpr(sdg_pattern, col, perl = TRUE)
+  if (match != -1) {
+    sdg_num <- as.numeric(gsub(sdg_pattern, "\\1", str_extract(col, sdg_pattern)))
+    if (is.null(sdg_groups[[sdg_num]])) {
+      sdg_groups[[sdg_num]] <- c()
+    }
+    sdg_groups[[sdg_num]] <- c(sdg_groups[[sdg_num]], col)
+  }
+}
+
+# In thống kê mô tả cho từng biến trong từng nhóm
+for (sdg_num in sort(as.numeric(names(sdg_groups)))) {
+  cat(sprintf("\nThống kê mô tả cho SDG %d:\n", sdg_num))
+  cols <- sdg_groups[[as.character(sdg_num)]]
+  
+  for (col in cols) {
+    cat(sprintf("\nThống kê mô tả cho cột '%s':\n", col))
+    print(summary(df[[col]]))
+  }
+  cat(paste(rep("=", 50), collapse = ""), "\n")
+}
+
+# Lọc dữ liệu Việt Nam
+df_vietnam <- df[df$Country == "Vietnam", ]
+
+# Lọc dữ liệu 2023-2024
+df_vietnam_recent <- df_vietnam[df_vietnam$year %in% c(2023, 2024), ]
+
+# In dữ liệu Việt Nam
+cat("Dữ liệu Việt Nam 2023-2024:\n")
+print(df_vietnam_recent[, c("year", "SDG Index Score", "sdg1_lmicpov", "sdg7_renewcon", "sdg11_pm25", "sdg4_literacy")])
+
+# ---------- Biểu đồ thể hiện từng cột ----------
+plot_histograms_by_sdg <- function(df, sdg_groups, batch_size = 3, bins = 20) {
+  for (sdg_num in sort(as.numeric(names(sdg_groups)))) {
+    cat(sprintf("Vẽ histogram cho SDG %d\n", sdg_num))
+    cols <- sdg_groups[[as.character(sdg_num)]]
+    
+    for (i in seq(1, length(cols), by = batch_size)) {
+      batch <- cols[i:min(i + batch_size - 1, length(cols))]
+      num_plots <- length(batch)
+      
+      # Tạo layout cho đồ thị
+      if (num_plots > 0) {
+        par(mfrow = c(1, num_plots))
+        for (col in batch) {
+          hist(df[[col]], main = col, xlab = "Giá trị của biến", 
+               ylab = "Tần suất xuất hiện", breaks = bins, 
+               col = "lightblue", border = "black")
+        }
+        mtext(sprintf("SDG %d - Histogram cho các biến từ %d đến %d", 
+                     sdg_num, i, i + length(batch) - 1), 
+              side = 3, line = -2, outer = TRUE, font = 2)
+        par(mfrow = c(1, 1))
+      }
+    }
+  }
+}
+
+# Gọi hàm vẽ histograms
+plot_histograms_by_sdg(df, sdg_groups)
+
+# ---------- Xử lí các giá trị ngoại lai ----------
+detect_outliers_iqr <- function(df, group_cols, num_outliers = 10) {
+  outliers_info <- list()
+  total_outliers <- 0
+  
+  for (sdg in sort(as.numeric(names(group_cols)))) {
+    cat(sprintf("\n🔍 Kiểm tra SDG %d\n", sdg))
+    cols <- group_cols[[as.character(sdg)]]
+    
+    for (col in cols) {
+      # Bỏ qua nếu cột không tồn tại trong DataFrame
+      if (!(col %in% colnames(df))) {
+        cat(sprintf("Cột %s không tồn tại trong DataFrame\n", col))
+        next
+      }
+      
+      # Tính IQR và ngưỡng
+      Q1 <- quantile(df[[col]], 0.25, na.rm = TRUE)
+      Q3 <- quantile(df[[col]], 0.75, na.rm = TRUE)
+      IQR <- Q3 - Q1
+      
+      lower_bound <- Q1 - 1.5 * IQR
+      upper_bound <- Q3 + 1.5 * IQR
+      
+      outliers <- df[df[[col]] < lower_bound | df[[col]] > upper_bound, col]
+      num_outliers_found <- length(outliers)
+      total_outliers <- total_outliers + num_outliers_found
+      
+      if (num_outliers_found > 0) {
+        cat(sprintf("\n Biến: %s\n", col))
+        cat(sprintf(" - Q1: %.2f, Q3: %.2f, IQR: %.2f\n", Q1, Q3, IQR))
+        cat(sprintf(" - Ngưỡng: [%.2f, %.2f]\n", lower_bound, upper_bound))
+        cat(sprintf(" - Tổng số ngoại lai: %d\n", num_outliers_found))
+        
+        # Lấy 10 giá trị ngoại lai đầu tiên
+        top_outliers <- head(outliers, num_outliers)
+        cat(" - ", num_outliers, " giá trị ngoại lai đầu tiên:\n")
+        print(top_outliers)
+        
+        outliers_info[[col]] <- top_outliers
+      } else {
+        cat(sprintf("✔️ %s: Không có ngoại lai\n", col))
+      }
+    }
+  }
+  
+  cat(sprintf("\n📊 Tổng số ngoại lai phát hiện được: %d\n", total_outliers))
+  return(outliers_info)
+}
+
+outliers_dict <- detect_outliers_iqr(df, sdg_groups)
+
+# ---------- Phân tích mối quan hệ giữa các biến ----------
+# Scale dữ liệu bằng RobustScaler
+robust_scale <- function(x) {
+  median_val <- median(x, na.rm = TRUE)
+  mad_val <- mad(x, na.rm = TRUE)
+  if (mad_val == 0) return(x - median_val)
+  return((x - median_val) / mad_val)
+}
+
+# Lưu lại các cột không scale
+non_numeric_cols <- c("Country", "year")
+
+# Lấy các cột số
+numeric_cols <- names(df)[sapply(df, is.numeric)]
+numeric_cols <- setdiff(numeric_cols, non_numeric_cols)
+
+df_scaled <- df
+for (col in numeric_cols) {
+  df_scaled[[col]] <- robust_scale(df[[col]])
+}
+
+# Hàm đánh giá mối quan hệ dựa trên hệ số tương quan
+evaluate_correlation <- function(corr_matrix) {
+  evaluation <- list()
+  
+  for (row in rownames(corr_matrix)) {
+    for (col in colnames(corr_matrix)) {
+      if (row != col) {  # Loại bỏ các cặp tương quan với chính nó
+        corr_value <- corr_matrix[row, col]
+        pair_key <- paste(row, col, sep = "_")
+        
+        if (abs(corr_value) >= 0.7) {
+          evaluation[[pair_key]] <- "Mối quan hệ mạnh"
+        } else if (abs(corr_value) >= 0.3) {
+          evaluation[[pair_key]] <- "Mối quan hệ trung bình"
+        } else {
+          evaluation[[pair_key]] <- "Mối quan hệ yếu"
+        }
+      }
+    }
+  }
+  
+  return(evaluation)
+}
+
+# Vẽ heatmap và tự động đánh giá
+for (sdg_name in names(sdg_groups)) {
+  sdg_vars <- sdg_groups[[sdg_name]]
+  
+  # Chỉ xử lý nếu có đủ biến
+  if (length(sdg_vars) > 1) {
+    cat(sprintf("\nPhân tích tương quan cho SDG %s\n", sdg_name))
+    
+    # Tính ma trận tương quan
+    corr_matrix <- cor(df_scaled[, sdg_vars], use = "pairwise.complete.obs")
+    
+    # Vẽ heatmap
+    png(paste0("correlation_sdg", sdg_name, ".png"), width = 800, height = 600)
+    corrplot(corr_matrix, method = "color", type = "upper", 
+             tl.col = "black", tl.srt = 45, addCoef.col = "black",
+             col = colorRampPalette(c("blue", "white", "red"))(100))
+    title(paste("Ma trận tương quan - SDG", sdg_name))
+    dev.off()
+    
+    # Đánh giá mối quan hệ
+    evaluation <- evaluate_correlation(corr_matrix)
+    cat("\nĐánh giá mối quan hệ:\n")
+    for (pair in names(evaluation)) {
+      var_names <- strsplit(pair, "_")[[1]]
+      cat(sprintf("%s và %s: %s\n", var_names[1], var_names[2], evaluation[[pair]]))
+    }
+    cat(paste(rep("=", 50), collapse = ""), "\n")
+  }
+}
+
+# Tính trung bình các chỉ số theo từng nhóm SDG
+for (sdg_num in sort(as.numeric(names(sdg_groups)))) {
+  sdg_name <- as.character(sdg_num)
+  cols <- sdg_groups[[sdg_name]]
+  
+  # Tính trung bình cho các chỉ số của nhóm SDG
+  df[[paste0("SDG", sdg_num, "_Index")]] <- rowMeans(df[, cols], na.rm = TRUE)
+  
+  # In ra dòng đầu tiên của DataFrame sau khi tính trung bình
+  cat(sprintf("Trung bình cho nhóm SDG%d (dòng đầu tiên):\n", sdg_num))
+  print(head(df[, paste0("SDG", sdg_num, "_Index"), drop = FALSE], 1))
+  cat(paste(rep("=", 50), collapse = ""), "\n")
+}
+
+# Tính ma trận tương quan cho các chỉ số SDG
+sdg_index_cols <- paste0("SDG", sort(as.numeric(names(sdg_groups))), "_Index")
+corr_matrix <- cor(df[, sdg_index_cols], use = "pairwise.complete.obs")
+
+# Vẽ heatmap
+png("SDG_indices_correlation.png", width = 1000, height = 800)
+corrplot(corr_matrix, method = "color", type = "upper", 
+         tl.col = "black", tl.srt = 45, addCoef.col = "black",
+         col = colorRampPalette(c("blue", "white", "red"))(100))
+title("Ma trận tương quan giữa các SDG")
+dev.off()
+
+# Đánh giá mối quan hệ
+evaluation <- evaluate_correlation(corr_matrix)
+cat("\nĐánh giá mối quan hệ giữa các chỉ số SDG:\n")
+for (pair in names(evaluation)) {
+  var_names <- strsplit(pair, "_")[[1]]
+  cat(sprintf("%s và %s: %s\n", var_names[1], var_names[2], evaluation[[pair]]))
+}
+cat(paste(rep("=", 50), collapse = ""), "\n")
+
+# ---------- Feature Engineering ----------
+
+# Tạo các biến tương tác với ý nghĩa thực tế
+eps <- 1e-6  # Định nghĩa epsilon để tránh chia cho 0
+
+df$sdg6_water_elec <- df$sdg6_safewat * df$sdg7_elecac  # Nước sạch và điện năng
+df$sdg8_accounts_rdex <- df$sdg8_accounts * df$sdg9_rdex  # Tài khoản tài chính và nghiên cứu
+df$sdg3_uhc_sanitation <- df$sdg3_uhc * df$sdg6_sanita  # Bảo hiểm y tế và vệ sinh
+df$sdg11_slums_pollprod <- df$sdg11_slums * df$sdg12_pollprod  # Khu ổ chuột và ô nhiễm sản xuất
+df$sdg13_co2_cpta <- df$sdg13_co2gcp * df$sdg15_cpta  # CO2 và diện tích cây trồng
+df$sdg16_cpi_statperf <- df$sdg16_cpi * df$sdg17_statperf  # Tham nhũng và hiệu suất thống kê
+df$sdg1_income_poverty_ratio <- df$sdg1_wpc / (df$sdg1_lmicpov + eps)  # Tỷ lệ thu nhập và nghèo đói
+
+# Danh sách các cột tương tác
+interaction_cols <- c(
+  'sdg6_water_elec', 'sdg8_accounts_rdex', 'sdg3_uhc_sanitation',
+  'sdg11_slums_pollprod', 'sdg13_co2_cpta', 'sdg16_cpi_statperf',
+  'sdg1_income_poverty_ratio'
+)
+
+# Hiển thị 5 dòng đầu của các đặc trưng tương tác
+cat("5 dòng đầu của các đặc trưng tương tác:\n")
+print(head(df[interaction_cols], 5))
+
+# ---------- Biến động thời gian ----------
+# Tính tốc độ tăng trưởng hàng năm (YoY) cho các cột SDG
+
+# Chọn các cột SDG gốc
+sdg_cols <- grep("^sdg", names(df), value = TRUE)
+sdg_cols <- sdg_cols[!grepl("_yoy$", sdg_cols) & sdg_cols != "sdg3_uhc"]
+
+# Tính phần trăm thay đổi YoY theo từng quốc gia
+for (country in unique(df$Country)) {
+  country_data <- df[df$Country == country, ]
+  country_data <- country_data[order(country_data$year), ]
+  
+  for (col in sdg_cols) {
+    yoy_col <- paste0(col, "_yoy")
+    yoy_values <- c(NA, diff(country_data[[col]]) / abs(country_data[[col]][-length(country_data[[col]])]))
+    df[df$Country == country, yoy_col] <- yoy_values
+  }
+}
+
+# Lọc dữ liệu cho Vietnam để kiểm tra
+vietnam_df <- df[df$Country == "Vietnam", ]
+
+# Hiển thị các cột liên quan (Country, year và YoY)
+yoy_cols <- grep("_yoy$", names(df), value = TRUE)
+cols_to_display <- c("Country", "year", head(yoy_cols, 5))  # Chỉ hiện 5 cột YoY đầu tiên để tiết kiệm không gian
+cat("Dữ liệu YoY cho Vietnam (5 dòng đầu):\n")
+print(head(vietnam_df[, cols_to_display], 5))
+
+# ---------- Chuẩn hóa theo nhóm SDG ----------
+# Sử dụng MinMaxScaler để chuẩn hóa các cột trong mỗi nhóm SDG về [0, 1]
+
+# Lọc các cột SDG gốc
+sdg_cols <- grep("^sdg", names(df), value = TRUE)
+sdg_cols <- sdg_cols[!grepl("_yoy$", sdg_cols) & sdg_cols != "sdg3_uhc"]
+
+# Tạo từ điển nhóm SDG dựa trên prefix (sdg1, sdg2,...)
+sdg_groups_from_cols <- list()
+for (col in sdg_cols) {
+  group <- sub("_.*$", "", col)  # Lấy prefix (ví dụ: sdg1)
+  if (!(group %in% names(sdg_groups_from_cols))) {
+    sdg_groups_from_cols[[group]] <- c()
+  }
+  sdg_groups_from_cols[[group]] <- c(sdg_groups_from_cols[[group]], col)
+}
+
+# Chuẩn hóa MinMax
+min_max_scale <- function(x) {
+  if (max(x, na.rm = TRUE) == min(x, na.rm = TRUE)) return(x)
+  return((x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE)))
+}
+
+# Chuẩn hóa từng nhóm SDG
+for (group in names(sdg_groups_from_cols)) {
+  cols <- sdg_groups_from_cols[[group]]
+  for (col in cols) {
+    df[[col]] <- min_max_scale(df[[col]])
+  }
+  cat(sprintf("Đã chuẩn hóa nhóm %s với các cột: %s\n", group, paste(cols, collapse = ", ")))
+  print(head(df[cols], 5))
+  cat(paste(rep("=", 50), collapse = ""), "\n")
+}
+
+# ---------- Trực quan hóa đặc trưng mới ----------
+# Sử dụng pairs để khám phá mối quan hệ và phân phối của các đặc trưng tương tác
+
+# Vẽ pairs plot với histogram trên đường chéo
+png("interaction_features_pairs.png", width = 1200, height = 1000)
+pairs(df[interaction_cols], main = "Pairwise Scatter Plot of Interaction Features")
+dev.off()
+
+# ---------- PCA: Giảm chiều dữ liệu ----------
+# Giảm chiều dữ liệu tương tác xuống 2 thành phần chính
+
+library(stats)
+
+# Danh sách các cột tương tác
+interaction_columns <- c(
+  'sdg6_water_elec', 'sdg8_accounts_rdex', 'sdg3_uhc_sanitation',
+  'sdg11_slums_pollprod', 'sdg13_co2_cpta', 'sdg16_cpi_statperf',
+  'sdg1_income_poverty_ratio'
+)
+
+# Chuẩn hóa dữ liệu trước khi áp dụng PCA
+interaction_data <- scale(df[interaction_columns])
+
+# Áp dụng PCA với 2 thành phần chính
+pca_result <- prcomp(interaction_data, center = TRUE, scale. = TRUE)
+explained_var <- pca_result$sdev^2 / sum(pca_result$sdev^2)
+
+cat(sprintf("Tỷ lệ phương sai giải thích: PC1 = %.2f, PC2 = %.2f\n", 
+            explained_var[1], explained_var[2]))
+
+# Vẽ scatter plot
+png("pca_interaction_features.png", width = 800, height = 600)
+plot(pca_result$x[,1], pca_result$x[,2], 
+     main = "PCA of Interaction Features",
+     xlab = sprintf("Principal Component 1 (%.2f%% variance)", explained_var[1]*100),
+     ylab = sprintf("Principal Component 2 (%.2f%% variance)", explained_var[2]*100),
+     pch = 16, col = "blue")
+dev.off()
+
+# ---------- Feature Selection ----------
+# 1. Chuẩn bị dữ liệu: chọn các đặc trưng số và loại bỏ giá trị NaN
+
+numerical_cols <- names(df)[sapply(df, is.numeric)]
+df_selection <- df[numerical_cols]
+
+# 2.0 Xử lý NaN và Inf trước khi tính VIF
+cat("\n2.0 Xử lý NaN và Inf:\n")
+# Thay thế Inf bằng NA
+df_selection[sapply(df_selection, is.infinite)] <- NA
+# Điền NA bằng giá trị trung bình của cột
+for (col in names(df_selection)) {
+  df_selection[[col]][is.na(df_selection[[col]])] <- mean(df_selection[[col]], na.rm = TRUE)
+}
+# Kiểm tra lại NA
+if (any(is.na(df_selection)) || any(sapply(df_selection, function(x) any(is.infinite(x))))) {
+  cat("Cảnh báo: Vẫn còn NA hoặc Inf trong dữ liệu!\n")
+} else {
+  cat("Dữ liệu đã sạch, không còn NA hoặc Inf.\n")
+}
+
+# ---------- Loại bỏ đa trọng tuyến (Multicollinearity) bằng VIF ----------
+cat("\n2.1 Kiểm tra đa trọng tuyến bằng VIF:\n")
+
+# Hàm tính VIF
+calculate_vif <- function(df) {
+  result <- data.frame(Feature = character(), VIF = numeric())
+  # Chọn các cột số với ít nhất 30 giá trị khác nhau để tránh lỗi cộng tuyến hoàn hảo
+  num_cols <- names(df)[sapply(df, function(x) is.numeric(x) && length(unique(x)) > 30)]
+  
+  for (i in seq_along(num_cols)) {
+    # Tạo công thức: biến hiện tại ~ tất cả biến khác
+    formula_str <- paste(num_cols[i], "~", paste(num_cols[-i], collapse = " + "))
+    
+    # Thử chạy mô hình hồi quy tuyến tính
+    tryCatch({
+      model <- lm(formula = as.formula(formula_str), data = df)
+      result <- rbind(result, data.frame(Feature = num_cols[i], VIF = 1/(1 - summary(model)$r.squared)))
+    }, error = function(e) {
+      result <- rbind(result, data.frame(Feature = num_cols[i], VIF = Inf))
+    })
+  }
+  
+  return(result)
+}
+
+# Tính VIF cho các biến có đủ giá trị khác nhau
+vif_data <- calculate_vif(df_selection)
+
+# ---------- Lọc các đặc trưng có VIF < 10 ----------
+selected_features_vif <- as.character(vif_data$Feature[vif_data$VIF < 10])
+cat("Các đặc trưng sau khi loại bỏ đa trọng tuyến (VIF < 10):\n")
+print(selected_features_vif)
+
+# ---------- Lựa chọn đặc trưng với L1 Regularization (Lasso) ----------
+cat("\n2.2 Lựa chọn đặc trưng với Lasso:\n")
+
+# Kiểm tra biến mục tiêu
+if (!("SDG Index Score" %in% names(df_selection))) {
+  cat("Lỗi: Không tìm thấy 'SDG Index Score'. Sử dụng cột đầu tiên làm biến mục tiêu để minh họa.\n")
+  y <- df_selection[[1]]  # Thay thế bằng cột mục tiêu thực tế
+  X <- df_selection[, -1]
+} else {
+  X <- df_selection[, setdiff(names(df_selection), "SDG Index Score")]
+  y <- df_selection[["SDG Index Score"]]
+}
+
+# Chuyển đổi DataFrame thành ma trận
+X_matrix <- as.matrix(X)
+y_vector <- as.vector(y)
+
+# Chạy Lasso với CV để tìm alpha tối ưu
+set.seed(42)
+cv_lasso <- cv.glmnet(X_matrix, y_vector, alpha = 1)
+lasso_model <- glmnet(X_matrix, y_vector, alpha = 1, lambda = cv_lasso$lambda.min)
+
+# Trích xuất hệ số
+lasso_coefs <- coef(lasso_model)
+non_zero_coefs <- lasso_coefs[lasso_coefs != 0, , drop = FALSE]
+selected_features_lasso <- rownames(non_zero_coefs)[-1]  # Bỏ qua hệ số chặn (intercept)
+
+cat("Các đặc trưng được chọn bởi Lasso:\n")
+print(selected_features_lasso)
+
+# ---------- Feature Importance với Random Forest ----------
+cat("\n2.3 Feature Importance với Random Forest:\n")
+
+# Chạy Random Forest
+set.seed(42)
+rf <- randomForest(x = X_matrix, y = y_vector, ntree = 100, importance = TRUE)
+
+# Trích xuất Feature Importance
+feature_importance <- as.data.frame(importance(rf))
+feature_importance$Feature <- rownames(feature_importance)
+feature_importance <- feature_importance[order(feature_importance$`%IncMSE`, decreasing = TRUE), ]
+
+cat("Tầm quan trọng đặc trưng từ Random Forest (Top 20):\n")
+print(head(feature_importance[, c("Feature", "%IncMSE")], 20))
+
+# ---------- Trực quan hóa ----------
+# 3.1 Heatmap tương quan
+cat("\n3.1 Vẽ Heatmap tương quan:\n")
+
+# Chọn top 10 đặc trưng từ Random Forest
+top_features <- head(feature_importance$Feature, 10)
+
+# Tính ma trận tương quan chỉ cho top đặc trưng
+corr_matrix <- cor(df_selection[, top_features], use = "pairwise.complete.obs")
+
+png("correlation_heatmap_top10.png", width = 1000, height = 800)
+corrplot(corr_matrix, method = "color", type = "upper", tl.col = "black",
+         tl.srt = 45, addCoef.col = "black", number.cex = 0.7,
+         col = colorRampPalette(c("blue", "white", "red"))(100))
+title("Correlation Heatmap of Top 10 Features from Random Forest")
+dev.off()
+
+# 3.2 Biểu đồ tầm quan trọng đặc trưng từ Random Forest
+cat("\n3.2 Vẽ biểu đồ tầm quan trọng đặc trưng:\n")
+
+top10_importance <- head(feature_importance, 10)
+
+png("feature_importance_top10.png", width = 1000, height = 800)
+barplot(top10_importance$`%IncMSE`, names.arg = top10_importance$Feature, 
+        horiz = TRUE, las = 1, cex.names = 0.7,
+        main = "Top 10 Feature Importance from Random Forest",
+        xlab = "Importance (%IncMSE)")
+dev.off()
+
+# 3.3 PCA cho các đặc trưng
+cat("\n3.3 PCA cho các đặc trưng:\n")
+
+# Kết hợp đặc trưng tương tác và top đặc trưng từ VIF/Lasso
+combined_features <- unique(c(interaction_cols, selected_features_vif, selected_features_lasso))
+combined_features <- combined_features[1:min(length(combined_features), 15)]  # chọn top 15
+
+df_combined <- df[, combined_features]
+
+# Xử lý NA và Inf
+df_combined[!is.finite(as.matrix(df_combined))] <- NA
+df_combined <- as.data.frame(lapply(df_combined, function(x) {
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  return(x)
+}))
+
+# PCA
+library(caret)
+library(ggplot2)
+
+scaled_df <- scale(df_combined)
+pca_model <- prcomp(scaled_df, center = TRUE, scale. = TRUE)
+summary(pca_model)$importance[2, 1:2]  # Tỷ lệ phương sai giải thích
+
+# Scatter plot
+pca_df <- as.data.frame(pca_model$x)
+ggplot(pca_df, aes(PC1, PC2)) +
+  geom_point(alpha = 0.5) +
+  ggtitle("PCA of Selected Features") +
+  xlab(paste0("Principal Component 1 (", round(summary(pca_model)$importance[2, 1] * 100, 2), "%)")) +
+  ylab(paste0("Principal Component 2 (", round(summary(pca_model)$importance[2, 2] * 100, 2), "%)"))
+
+# ---------- Feature Extraction ----------
+# 3.1 PCA theo nhóm SDG
+pca_results <- list()
+
+for (group in names(sdg_groups)) {
+  cols <- sdg_groups[[group]]
+  df_group <- df[, cols]
+
+  df_group[!is.finite(as.matrix(df_group))] <- NA
+  df_group <- as.data.frame(lapply(df_group, function(x) {
+    x[is.na(x)] <- mean(x, na.rm = TRUE)
+    return(x)
+  }))
+
+  if (ncol(df_group) >= 2) {
+    scaled <- scale(df_group)
+    pca_model <- prcomp(scaled, center = TRUE, scale. = TRUE)
+    explained_var <- summary(pca_model)$importance[2, ]
+    cumulative_var <- cumsum(explained_var)
+    pca_results[[group]] <- list(explained_var = explained_var, cumulative_var = cumulative_var)
+    print(paste("SDG Group:", group, "- Tổng phương sai:", round(cumulative_var[length(cumulative_var)] * 100, 2), "%"))
+  }
+}
+
+# 3.2 T-SNE toàn bộ dữ liệu
+library(Rtsne)
+
+df_tsne <- df_selection
+df_tsne[!is.finite(as.matrix(df_tsne))] <- NA
+df_tsne <- as.data.frame(lapply(df_tsne, function(x) {
+  x[is.na(x)] <- mean(x, na.rm = TRUE)
+  return(x)
+}))
+
+scaled_df <- scale(df_tsne)
+set.seed(42)
+tsne_result <- Rtsne(scaled_df, dims = 2, perplexity = 30, verbose = TRUE)
+plot(tsne_result$Y, main = "T-SNE of All Numerical Features", xlab = "T-SNE 1", ylab = "T-SNE 2", pch = 19, col = "blue")
+
+# 4. Trực quan hóa 
+# 4.1 Heatmap tương quan top 10 đặc trưng
+library(corrplot)
+
+top_features <- head(feature_importance$Feature, 10)
+corr_matrix <- cor(df_selection[, top_features])
+corrplot(corr_matrix, method = "color", title = "Top 10 Features Correlation Heatmap", tl.col = "black")
+
+# 4.2 Barplot tầm quan trọng
+top_imp <- head(feature_importance, 10)
+ggplot(top_imp, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_col(fill = "skyblue") +
+  coord_flip() +
+  ggtitle("Top 10 Feature Importance from Random Forest")
+
+# 4.3 Phương sai tích lũy theo nhóm
+for (group in names(pca_results)) {
+  var <- pca_results[[group]]$cumulative_var
+  plot(var, type = "o", main = paste("Cumulative Explained Variance -", group),
+       xlab = "Number of Components", ylab = "Cumulative Variance", ylim = c(0, 1))
+}
+
+# 4.4 T-SNE Scatter
+tsne_df <- as.data.frame(tsne_result$Y)
+ggplot(tsne_df, aes(x = V1, y = V2)) +
+  geom_point(alpha = 0.5) +
+  ggtitle("T-SNE of All Numerical Features") +
+  xlab("T-SNE Component 1") +
+  ylab("T-SNE Component 2")
