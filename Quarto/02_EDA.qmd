@@ -1,4 +1,6 @@
+
 # ---------- Đọc và kiểm tra dữ liệu ----------
+```{r}
 library(readxl)
 library(dplyr)
 library(ggplot2)
@@ -10,15 +12,18 @@ library(car)
 library(randomForest)
 library(Rtsne)
 library(glmnet)
-
 # Đọc dữ liệu từ file Excel
 df <- read_excel("data/processed/SRD_data_cleaned.xlsx")
 
 # Xem thông tin tổng quát
 str(df)
 summary(df)
+```
 
 # ---------- Nhóm các kiểu dữ liệu ----------
+
+```{r}
+
 # Lấy danh sách tất cả các cột
 columns <- colnames(df)
 print(columns)
@@ -53,7 +58,9 @@ for (sdg_num in sort(as.numeric(names(sdg_groups)))) {
   }
   cat(paste(rep("=", 50), collapse = ""), "\n")
 }
+```
 
+```{r}
 # Lọc dữ liệu Việt Nam
 df_vietnam <- df[df$Country == "Vietnam", ]
 
@@ -63,8 +70,10 @@ df_vietnam_recent <- df_vietnam[df_vietnam$year %in% c(2023, 2024), ]
 # In dữ liệu Việt Nam
 cat("Dữ liệu Việt Nam 2023-2024:\n")
 print(df_vietnam_recent[, c("year", "SDG Index Score", "sdg1_lmicpov", "sdg7_renewcon", "sdg11_pm25", "sdg4_literacy")])
+```
 
 # ---------- Biểu đồ thể hiện từng cột ----------
+```{r}
 plot_histograms_by_sdg <- function(df, sdg_groups, batch_size = 3, bins = 20) {
   for (sdg_num in sort(as.numeric(names(sdg_groups)))) {
     cat(sprintf("Vẽ histogram cho SDG %d\n", sdg_num))
@@ -93,8 +102,10 @@ plot_histograms_by_sdg <- function(df, sdg_groups, batch_size = 3, bins = 20) {
 
 # Gọi hàm vẽ histograms
 plot_histograms_by_sdg(df, sdg_groups)
+```
 
 # ---------- Xử lí các giá trị ngoại lai ----------
+```{r}
 detect_outliers_iqr <- function(df, group_cols, num_outliers = 10) {
   outliers_info <- list()
   total_outliers <- 0
@@ -145,8 +156,10 @@ detect_outliers_iqr <- function(df, group_cols, num_outliers = 10) {
 }
 
 outliers_dict <- detect_outliers_iqr(df, sdg_groups)
+```
 
 # ---------- Phân tích mối quan hệ giữa các biến ----------
+```{r}
 # Scale dữ liệu bằng RobustScaler
 robust_scale <- function(x) {
   median_val <- median(x, na.rm = TRUE)
@@ -255,9 +268,10 @@ for (pair in names(evaluation)) {
   cat(sprintf("%s và %s: %s\n", var_names[1], var_names[2], evaluation[[pair]]))
 }
 cat(paste(rep("=", 50), collapse = ""), "\n")
+```
 
 # ---------- Feature Engineering ----------
-
+```{r}
 # Tạo các biến tương tác với ý nghĩa thực tế
 eps <- 1e-6  # Định nghĩa epsilon để tránh chia cho 0
 
@@ -279,8 +293,10 @@ interaction_cols <- c(
 # Hiển thị 5 dòng đầu của các đặc trưng tương tác
 cat("5 dòng đầu của các đặc trưng tương tác:\n")
 print(head(df[interaction_cols], 5))
+```
 
 # ---------- Biến động thời gian ----------
+```{r}
 # Tính tốc độ tăng trưởng hàng năm (YoY) cho các cột SDG
 
 # Chọn các cột SDG gốc
@@ -307,8 +323,10 @@ yoy_cols <- grep("_yoy$", names(df), value = TRUE)
 cols_to_display <- c("Country", "year", head(yoy_cols, 5))  # Chỉ hiện 5 cột YoY đầu tiên để tiết kiệm không gian
 cat("Dữ liệu YoY cho Vietnam (5 dòng đầu):\n")
 print(head(vietnam_df[, cols_to_display], 5))
+```
 
 # ---------- Chuẩn hóa theo nhóm SDG ----------
+```{r}
 # Sử dụng MinMaxScaler để chuẩn hóa các cột trong mỗi nhóm SDG về [0, 1]
 
 # Lọc các cột SDG gốc
@@ -341,16 +359,20 @@ for (group in names(sdg_groups_from_cols)) {
   print(head(df[cols], 5))
   cat(paste(rep("=", 50), collapse = ""), "\n")
 }
+```
 
 # ---------- Trực quan hóa đặc trưng mới ----------
+```{r}
 # Sử dụng pairs để khám phá mối quan hệ và phân phối của các đặc trưng tương tác
 
 # Vẽ pairs plot với histogram trên đường chéo
 png("interaction_features_pairs.png", width = 1200, height = 1000)
 pairs(df[interaction_cols], main = "Pairwise Scatter Plot of Interaction Features")
 dev.off()
+```
 
 # ---------- PCA: Giảm chiều dữ liệu ----------
+```{r}
 # Giảm chiều dữ liệu tương tác xuống 2 thành phần chính
 
 library(stats)
@@ -380,8 +402,10 @@ plot(pca_result$x[,1], pca_result$x[,2],
      ylab = sprintf("Principal Component 2 (%.2f%% variance)", explained_var[2]*100),
      pch = 16, col = "blue")
 dev.off()
+```
 
 # ---------- Feature Selection ----------
+```{r}
 # 1. Chuẩn bị dữ liệu: chọn các đặc trưng số và loại bỏ giá trị NaN
 
 numerical_cols <- names(df)[sapply(df, is.numeric)]
@@ -401,8 +425,10 @@ if (any(is.na(df_selection)) || any(sapply(df_selection, function(x) any(is.infi
 } else {
   cat("Dữ liệu đã sạch, không còn NA hoặc Inf.\n")
 }
+```
 
 # ---------- Loại bỏ đa trọng tuyến (Multicollinearity) bằng VIF ----------
+```{r}
 cat("\n2.1 Kiểm tra đa trọng tuyến bằng VIF:\n")
 
 # Hàm tính VIF
@@ -429,13 +455,14 @@ calculate_vif <- function(df) {
 
 # Tính VIF cho các biến có đủ giá trị khác nhau
 vif_data <- calculate_vif(df_selection)
-
 # ---------- Lọc các đặc trưng có VIF < 10 ----------
 selected_features_vif <- as.character(vif_data$Feature[vif_data$VIF < 10])
 cat("Các đặc trưng sau khi loại bỏ đa trọng tuyến (VIF < 10):\n")
 print(selected_features_vif)
+```
 
 # ---------- Lựa chọn đặc trưng với L1 Regularization (Lasso) ----------
+```{r}
 cat("\n2.2 Lựa chọn đặc trưng với Lasso:\n")
 
 # Kiểm tra biến mục tiêu
@@ -457,15 +484,21 @@ set.seed(42)
 cv_lasso <- cv.glmnet(X_matrix, y_vector, alpha = 1)
 lasso_model <- glmnet(X_matrix, y_vector, alpha = 1, lambda = cv_lasso$lambda.min)
 
-# Trích xuất hệ số
+# Trích xuất hệ số đúng cách
 lasso_coefs <- coef(lasso_model)
-non_zero_coefs <- lasso_coefs[lasso_coefs != 0, , drop = FALSE]
-selected_features_lasso <- rownames(non_zero_coefs)[-1]  # Bỏ qua hệ số chặn (intercept)
+# Lấy chỉ số (indices) của các hệ số khác 0
+non_zero_indices <- which(as.vector(lasso_coefs) != 0)
+# Lấy tên của các đặc trưng có hệ số khác 0
+selected_features_lasso <- rownames(lasso_coefs)[non_zero_indices]
+# Loại bỏ hệ số chặn (intercept) nếu có
+selected_features_lasso <- selected_features_lasso[selected_features_lasso != "(Intercept)"]
 
 cat("Các đặc trưng được chọn bởi Lasso:\n")
 print(selected_features_lasso)
+```
 
 # ---------- Feature Importance với Random Forest ----------
+```{r}
 cat("\n2.3 Feature Importance với Random Forest:\n")
 
 # Chạy Random Forest
@@ -479,8 +512,10 @@ feature_importance <- feature_importance[order(feature_importance$`%IncMSE`, dec
 
 cat("Tầm quan trọng đặc trưng từ Random Forest (Top 20):\n")
 print(head(feature_importance[, c("Feature", "%IncMSE")], 20))
+```
 
 # ---------- Trực quan hóa ----------
+```{r}
 # 3.1 Heatmap tương quan
 cat("\n3.1 Vẽ Heatmap tương quan:\n")
 
@@ -540,8 +575,10 @@ ggplot(pca_df, aes(PC1, PC2)) +
   ggtitle("PCA of Selected Features") +
   xlab(paste0("Principal Component 1 (", round(summary(pca_model)$importance[2, 1] * 100, 2), "%)")) +
   ylab(paste0("Principal Component 2 (", round(summary(pca_model)$importance[2, 2] * 100, 2), "%)"))
+```
 
 # ---------- Feature Extraction ----------
+```{r}
 # 3.1 PCA theo nhóm SDG
 pca_results <- list()
 
@@ -580,6 +617,8 @@ set.seed(42)
 tsne_result <- Rtsne(scaled_df, dims = 2, perplexity = 30, verbose = TRUE)
 plot(tsne_result$Y, main = "T-SNE of All Numerical Features", xlab = "T-SNE 1", ylab = "T-SNE 2", pch = 19, col = "blue")
 
+```
+```{r}
 # 4. Trực quan hóa 
 # 4.1 Heatmap tương quan top 10 đặc trưng
 library(corrplot)
@@ -589,11 +628,26 @@ corr_matrix <- cor(df_selection[, top_features])
 corrplot(corr_matrix, method = "color", title = "Top 10 Features Correlation Heatmap", tl.col = "black")
 
 # 4.2 Barplot tầm quan trọng
-top_imp <- head(feature_importance, 10)
-ggplot(top_imp, aes(x = reorder(Feature, Importance), y = Importance)) +
+# First, let's examine the structure of feature_importance to see actual column names
+print(names(feature_importance))
+
+# Assuming the importance column might be named differently (e.g., "importance" lowercase or "MeanDecreaseGini")
+# Let's adapt the code to use whatever column contains the importance values
+importance_col <- names(feature_importance)[2]  # Assuming importance is in the second column
+
+ggplot(top_imp, aes(x = reorder(Feature, .data[[importance_col]]), y = .data[[importance_col]])) +
   geom_col(fill = "skyblue") +
   coord_flip() +
-  ggtitle("Top 10 Feature Importance from Random Forest")
+  ggtitle("Top 10 Feature Importance from Random Forest") +
+  xlab("Features") +
+  ylab("Importance")
+  
+# # 4.2 Barplot tầm quan trọng
+# top_imp <- head(feature_importance, 10)
+# ggplot(top_imp, aes(x = reorder(Feature, Importance), y = Importance)) +
+#   geom_col(fill = "skyblue") +
+#   coord_flip() +
+#   ggtitle("Top 10 Feature Importance from Random Forest")
 
 # 4.3 Phương sai tích lũy theo nhóm
 for (group in names(pca_results)) {
@@ -609,3 +663,4 @@ ggplot(tsne_df, aes(x = V1, y = V2)) +
   ggtitle("T-SNE of All Numerical Features") +
   xlab("T-SNE Component 1") +
   ylab("T-SNE Component 2")
+```
